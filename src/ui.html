@@ -1,0 +1,277 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<style>
+  :root {
+    color-scheme: light dark;
+    --bg: #ffffff;
+    --fg: #1e1e1e;
+    --muted: #6b6b6b;
+    --border: #e5e5e5;
+    --accent: #0d99ff;
+    --accent-fg: #ffffff;
+    --pill-bg: #f5f5f5;
+    --pill-bg-active: #1e1e1e;
+    --pill-fg-active: #ffffff;
+    --code-bg: #fafafa;
+    --error: #d33;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root {
+      --bg: #2c2c2c;
+      --fg: #e6e6e6;
+      --muted: #9a9a9a;
+      --border: #444;
+      --pill-bg: #3a3a3a;
+      --pill-bg-active: #e6e6e6;
+      --pill-fg-active: #1e1e1e;
+      --code-bg: #1f1f1f;
+    }
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0;
+    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Inter, sans-serif;
+    font-size: 12px;
+    color: var(--fg);
+    background: var(--bg);
+    display: flex;
+    flex-direction: column;
+    height: 100vh;
+  }
+  .header {
+    padding: 12px 16px 8px;
+    border-bottom: 1px solid var(--border);
+  }
+  .selection {
+    font-size: 11px;
+    color: var(--muted);
+    min-height: 16px;
+  }
+  .selection strong { color: var(--fg); }
+  .mode {
+    display: flex;
+    gap: 4px;
+    margin-top: 8px;
+    background: var(--pill-bg);
+    padding: 3px;
+    border-radius: 8px;
+    width: fit-content;
+  }
+  .mode button {
+    background: transparent;
+    border: 0;
+    padding: 5px 12px;
+    border-radius: 6px;
+    cursor: pointer;
+    color: var(--fg);
+    font-size: 11px;
+    font-weight: 500;
+  }
+  .mode button.active {
+    background: var(--pill-bg-active);
+    color: var(--pill-fg-active);
+  }
+  .mode-desc {
+    font-size: 10px;
+    color: var(--muted);
+    margin-top: 6px;
+  }
+  .actions {
+    display: flex;
+    gap: 8px;
+    padding: 10px 16px;
+    border-bottom: 1px solid var(--border);
+  }
+  .actions button {
+    flex: 1;
+    padding: 7px 12px;
+    border-radius: 6px;
+    border: 1px solid var(--border);
+    background: var(--bg);
+    color: var(--fg);
+    cursor: pointer;
+    font-size: 11px;
+    font-weight: 500;
+  }
+  .actions button.primary {
+    background: var(--accent);
+    color: var(--accent-fg);
+    border-color: var(--accent);
+  }
+  .actions button:disabled {
+    opacity: 0.5;
+    cursor: not-allowed;
+  }
+  .preview {
+    flex: 1;
+    overflow: auto;
+    padding: 12px 16px;
+    background: var(--code-bg);
+    font-family: ui-monospace, "SF Mono", Menlo, Consolas, monospace;
+    font-size: 11px;
+    line-height: 1.45;
+    white-space: pre;
+  }
+  .footer {
+    padding: 8px 16px;
+    border-top: 1px solid var(--border);
+    font-size: 11px;
+    color: var(--muted);
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+  }
+  .toast {
+    color: var(--accent);
+    font-weight: 500;
+    opacity: 0;
+    transition: opacity 0.2s;
+  }
+  .toast.show { opacity: 1; }
+  .toast.error { color: var(--error); }
+</style>
+</head>
+<body>
+  <div class="header">
+    <div class="selection" id="selection">No selection</div>
+    <div class="mode" role="tablist">
+      <button type="button" id="modeFull" class="active" data-mode="full">Full JSON</button>
+      <button type="button" id="modeCompact" data-mode="compact">Compact</button>
+    </div>
+    <div class="mode-desc" id="modeDesc">All properties, formatted, ~5× more tokens.</div>
+  </div>
+  <div class="actions">
+    <button type="button" id="exportBtn" class="primary">Export</button>
+    <button type="button" id="copyBtn" disabled>Copy</button>
+    <button type="button" id="downloadBtn" disabled>Download</button>
+  </div>
+  <pre class="preview" id="preview">Select a frame and click Export.</pre>
+  <div class="footer">
+    <span id="stats"></span>
+    <span class="toast" id="toast"></span>
+  </div>
+
+<script>
+  let currentMode = "full";
+  let currentJson = "";
+  let currentSelectionName = "";
+
+  const $ = (id) => document.getElementById(id);
+
+  const modeDescriptions = {
+    full: "All properties, formatted, ~5× more tokens.",
+    compact: "Short keys, defaults omitted, single-line. Best for LLMs."
+  };
+
+  function setMode(mode) {
+    currentMode = mode;
+    $("modeFull").classList.toggle("active", mode === "full");
+    $("modeCompact").classList.toggle("active", mode === "compact");
+    $("modeDesc").textContent = modeDescriptions[mode];
+  }
+
+  $("modeFull").onclick = () => setMode("full");
+  $("modeCompact").onclick = () => setMode("compact");
+
+  $("exportBtn").onclick = () => {
+    showToast("Exporting…");
+    parent.postMessage({ pluginMessage: { type: "export", mode: currentMode } }, "*");
+  };
+
+  $("copyBtn").onclick = async () => {
+    if (!currentJson) return;
+    try {
+      await navigator.clipboard.writeText(currentJson);
+      showToast("Copied");
+    } catch {
+      showToast("Copy failed", true);
+    }
+  };
+
+  $("downloadBtn").onclick = () => {
+    if (!currentJson) return;
+    const safe = (currentSelectionName || "figma-export").replace(/[^a-z0-9_-]+/gi, "_");
+    const suffix = currentMode === "compact" ? ".compact.json" : ".json";
+    const blob = new Blob([currentJson], { type: "application/json" });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement("a");
+    a.href = url;
+    a.download = safe + suffix;
+    document.body.appendChild(a);
+    a.click();
+    a.remove();
+    URL.revokeObjectURL(url);
+    showToast("Downloaded");
+  };
+
+  let toastTimer;
+  function showToast(msg, isError = false) {
+    const t = $("toast");
+    t.textContent = msg;
+    t.classList.toggle("error", isError);
+    t.classList.add("show");
+    clearTimeout(toastTimer);
+    toastTimer = setTimeout(() => t.classList.remove("show"), 1800);
+  }
+
+  function renderSelection(info) {
+    const sel = $("selection");
+    if (!info || info.count === 0) {
+      sel.innerHTML = "No selection — select a frame in Figma";
+      currentSelectionName = "";
+      return;
+    }
+    if (info.count > 1) {
+      sel.innerHTML = `<strong>${info.count}</strong> nodes selected`;
+      currentSelectionName = "multi";
+      return;
+    }
+    currentSelectionName = info.name || "";
+    const size = info.width != null ? ` · ${Math.round(info.width)}×${Math.round(info.height)}` : "";
+    sel.innerHTML = `<strong>${escapeHtml(info.name)}</strong> <span style="color:var(--muted)">${info.type}${size}</span>`;
+  }
+
+  function escapeHtml(s) {
+    return String(s).replace(/[&<>"']/g, (c) => ({
+      "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;"
+    }[c]));
+  }
+
+  function setResult(json, mode) {
+    currentJson = json;
+    const preview = $("preview");
+    if (json.length > 200000) {
+      preview.textContent = json.slice(0, 200000) + "\n\n… (truncated in preview — copy or download for full)";
+    } else {
+      preview.textContent = json;
+    }
+    $("copyBtn").disabled = false;
+    $("downloadBtn").disabled = false;
+    const bytes = new Blob([json]).size;
+    $("stats").textContent = `${mode} · ${formatBytes(bytes)} · ${json.length.toLocaleString()} chars`;
+    showToast("Done");
+  }
+
+  function formatBytes(b) {
+    if (b < 1024) return b + " B";
+    if (b < 1024 * 1024) return (b / 1024).toFixed(1) + " KB";
+    return (b / 1024 / 1024).toFixed(2) + " MB";
+  }
+
+  window.onmessage = (event) => {
+    const msg = event.data.pluginMessage;
+    if (!msg) return;
+    if (msg.type === "selection") {
+      renderSelection(msg.info);
+    } else if (msg.type === "result") {
+      setResult(msg.json, msg.mode);
+    } else if (msg.type === "error") {
+      $("preview").textContent = "";
+      showToast(msg.message, true);
+    }
+  };
+</script>
+</body>
+</html>

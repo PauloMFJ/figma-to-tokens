@@ -1,0 +1,20 @@
+{
+	"name": "figma-to-tokens",
+	"version": "1.0.0",
+	"description": "Export Figma designs to clean JSON tokens for AI, LLMs and agents. Works in free Figma.",
+	"main": ".output/build.js",
+	"scripts": {
+		"build": "esbuild src/code.ts --bundle --outfile=.output/build.js --target=es2017 --format=esm",
+		"watch": "bun run build --watch",
+		"lint:type-check": "tsc --noEmit",
+		"lint:biome": "biome lint .",
+		"lint": "bun run lint:type-check && bun run lint:biome",
+		"fix": "biome format --write ."
+	},
+	"devDependencies": {
+		"@biomejs/biome": "^2.4.15",
+		"@figma/plugin-typings": "^1.126.0",
+		"esbuild": "^0.23.0",
+		"typescript": "^5.3.2"
+	}
+}
