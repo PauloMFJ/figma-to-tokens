@@ -11,7 +11,11 @@ Works in **free Figma** (no Dev Mode required).
 
 **One-way:** the output is intended for consumption by other apps, LLMs, or codegen — **not** to be round-tripped back into Figma. That shapes the choices: positions are relative to the export root (not the parent), absolute canvas coords aren't emitted, and compact drops Figma identifiers.
 
-## Install (dev)
+## Install
+
+Available on the [Figma Community](https://www.figma.com/community/plugin/1637922141059138776).
+
+### Local development
 
 ```bash
 bun install

@@ -1,6 +1,6 @@
 {
-	"name": "Figma To Tokens: Export Designs for AI, LLMs and Agents",
-	"id": "1399388645422727783",
+	"name": "Figma To Tokens",
+	"id": "1637922141059138776",
 	"api": "1.0.0",
 	"main": ".output/build.js",
 	"ui": "src/ui.html",
