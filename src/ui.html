@@ -188,8 +188,8 @@
     </div>
     <div class="mode-desc" id="modeDesc">All properties, formatted JSON. Browse below with collapsible tree.</div>
     <label class="option">
-      <input type="checkbox" id="excludeText" />
-      <span>Exclude text nodes</span>
+      <input type="checkbox" id="redactText" />
+      <span>Redact text content</span>
     </label>
   </div>
   <div class="actions">
@@ -234,12 +234,12 @@
     parent.postMessage({
       pluginMessage: {
         type: "export",
-        options: { excludeText: $("excludeText").checked }
+        options: { redactText: $("redactText").checked }
       }
     }, "*");
   };
   $("exportBtn").onclick = triggerExport;
-  $("excludeText").onchange = () => {
+  $("redactText").onchange = () => {
     // Re-export with new option, but only if there's an active export.
     if (renders.full) triggerExport();
   };

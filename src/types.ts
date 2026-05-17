@@ -55,6 +55,7 @@ export type PaintFull = {
 	color?: Hex;
 	gradientStops?: GradientStop[];
 	scaleMode?: ImagePaint["scaleMode"];
+	imageHash?: string;
 };
 
 export type EffectFull = {
@@ -86,6 +87,17 @@ export type TextFull = {
 	letterSpacing: string | null;
 	textCase: string | null;
 	textDecoration: TextNode["textDecoration"] | null;
+	/** Name of the linked Figma text style, e.g. "Heading/H4". */
+	textStyle: string | null;
+};
+
+/** Reference to a Figma component for INSTANCE nodes. */
+export type ComponentInfo = {
+	name: string;
+	/** Parent component-set name, when the component is a variant. */
+	set: string | null;
+	/** Component property overrides (variant values, text/boolean overrides). */
+	properties: Record<string, string | boolean> | null;
 };
 
 export type NodeFull = {
@@ -109,5 +121,15 @@ export type NodeFull = {
 	cornerRadius?: CornerRadius;
 	layout?: LayoutFull;
 	text?: TextFull;
+	/** Name of the linked Figma fill style (paint-style token). */
+	fillStyle?: string;
+	strokeStyle?: string;
+	effectStyle?: string;
+	/** Set when the node is a component INSTANCE. */
+	component?: ComponentInfo;
+	/** True when the node has prototyping reactions (clicks, hovers). */
+	interactive?: boolean;
+	/** True for frame-like nodes with no visible content (likely slots). */
+	slot?: boolean;
 	children?: NodeFull[];
 };

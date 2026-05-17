@@ -13,7 +13,15 @@ import type {
 } from "./types";
 
 type SerializeOptions = {
-	excludeText?: boolean;
+	redactText?: boolean;
+};
+
+type SerializeContext = {
+	options: SerializeOptions;
+	textStyles: Map<string, string>;
+	paintStyles: Map<string, string>;
+	effectStyles: Map<string, string>;
+	componentInfo: Map<string, { name: string; setName: string | null }>;
 };
 
 const main = () => {
@@ -59,10 +67,11 @@ const handleExport = async (options: SerializeOptions) => {
 			return;
 		}
 
+		const ctx = await buildContext(roots, options);
 		const tree =
 			roots.length === 1
-				? serialize(roots[0], roots[0], options)
-				: roots.map((n) => serialize(n, n, options));
+				? serialize(roots[0], roots[0], ctx)
+				: roots.map((n) => serialize(n, n, ctx));
 
 		figma.ui.postMessage({
 			type: "result",
@@ -73,6 +82,88 @@ const handleExport = async (options: SerializeOptions) => {
 		const message = err instanceof Error ? err.message : "Export failed.";
 		figma.ui.postMessage({ type: "error", message });
 	}
+};
+
+/**
+ * Walks the selected roots once to find style IDs and component
+ * instances, then resolves them async in parallel. The returned maps
+ * let `serialize` look up names synchronously.
+ */
+const buildContext = async (
+	roots: SceneNode[],
+	options: SerializeOptions,
+): Promise<SerializeContext> => {
+	const textStyleIds = new Set<string>();
+	const paintStyleIds = new Set<string>();
+	const effectStyleIds = new Set<string>();
+	const instances: InstanceNode[] = [];
+
+	const addStringId = (set: Set<string>, value: unknown) => {
+		if (typeof value === "string" && value) set.add(value);
+	};
+
+	const walk = (n: SceneNode) => {
+		if ("textStyleId" in n) addStringId(textStyleIds, n.textStyleId);
+		if ("fillStyleId" in n) addStringId(paintStyleIds, n.fillStyleId);
+		if ("strokeStyleId" in n) addStringId(paintStyleIds, n.strokeStyleId);
+		if ("effectStyleId" in n) addStringId(effectStyleIds, n.effectStyleId);
+		if (n.type === "INSTANCE") instances.push(n);
+		if ("children" in n) {
+			for (const c of n.children) walk(c);
+		}
+	};
+	for (const r of roots) walk(r);
+
+	const resolveStyles = async (
+		ids: Set<string>,
+	): Promise<Map<string, string>> => {
+		const map = new Map<string, string>();
+		await Promise.all(
+			[...ids].map(async (id) => {
+				try {
+					const s = await figma.getStyleByIdAsync(id);
+					if (s) map.set(id, s.name);
+				} catch {
+					// style deleted or inaccessible — skip
+				}
+			}),
+		);
+		return map;
+	};
+
+	const [textStyles, paintStyles, effectStyles] = await Promise.all([
+		resolveStyles(textStyleIds),
+		resolveStyles(paintStyleIds),
+		resolveStyles(effectStyleIds),
+	]);
+
+	const componentInfo = new Map<
+		string,
+		{ name: string; setName: string | null }
+	>();
+	await Promise.all(
+		instances.map(async (inst) => {
+			try {
+				const main = await inst.getMainComponentAsync();
+				if (!main) return;
+				const setName =
+					main.parent && main.parent.type === "COMPONENT_SET"
+						? main.parent.name
+						: null;
+				componentInfo.set(inst.id, { name: main.name, setName });
+			} catch {
+				// main component inaccessible — skip
+			}
+		}),
+	);
+
+	return {
+		options,
+		textStyles,
+		paintStyles,
+		effectStyles,
+		componentInfo,
+	};
 };
 
 type Tree = NodeFull | (NodeFull | null)[] | null;
@@ -139,7 +230,15 @@ const paintToFull = (p: Paint): PaintFull => {
 			color: rgbaToHex(s.color, 1),
 		}));
 	} else if (p.type === "IMAGE") {
-		base.scaleMode = p.scaleMode;
+		// Figma's "empty image" state has a null imageHash. Surface this as
+		// a distinct PLACEHOLDER type — scaleMode has no meaning without
+		// an actual image attached.
+		if (p.imageHash === null) {
+			base.type = "PLACEHOLDER";
+		} else {
+			base.scaleMode = p.scaleMode;
+			base.imageHash = p.imageHash;
+		}
 	}
 	return base;
 };
@@ -200,7 +299,7 @@ const fmtLetterSpacing = (ls: LetterSpacing): string => {
 	return ls.unit === "PIXELS" ? `${v}px` : `${v}%`;
 };
 
-const getText = (node: TextNode): TextFull => {
+const getText = (node: TextNode, ctx: SerializeContext): TextFull => {
 	const fontName = node.fontName === figma.mixed ? null : node.fontName;
 	const fontSize = node.fontSize === figma.mixed ? null : node.fontSize;
 	const rawLineHeight =
@@ -210,6 +309,11 @@ const getText = (node: TextNode): TextFull => {
 	const textCase = node.textCase === figma.mixed ? null : node.textCase;
 	const textDecoration =
 		node.textDecoration === figma.mixed ? null : node.textDecoration;
+	const textStyleId =
+		typeof node.textStyleId === "string" ? node.textStyleId : null;
+	const textStyle = textStyleId
+		? (ctx.textStyles.get(textStyleId) ?? null)
+		: null;
 
 	const fills = Array.isArray(node.fills) ? node.fills : [];
 	const firstSolid = fills.find(
@@ -219,8 +323,10 @@ const getText = (node: TextNode): TextFull => {
 		? rgbaToHex(firstSolid.color, firstSolid.opacity ?? 1)
 		: null;
 
+	const characters = ctx.options.redactText ? "..." : node.characters;
+
 	return {
-		characters: node.characters,
+		characters,
 		fontSize,
 		fontName,
 		color,
@@ -230,21 +336,28 @@ const getText = (node: TextNode): TextFull => {
 		letterSpacing: rawLetterSpacing ? fmtLetterSpacing(rawLetterSpacing) : null,
 		textCase,
 		textDecoration,
+		textStyle,
 	};
 };
 
+const lookupStyle = (
+	map: Map<string, string>,
+	id: unknown,
+): string | undefined => {
+	if (typeof id !== "string" || !id) return undefined;
+	return map.get(id);
+};
+
 /**
- * Builds the canonical `NodeFull` tree. Returns `null` for nodes that
- * should be omitted (invisible, or filtered by options); the caller
- * filters those out of `children`.
+ * Builds the canonical `NodeFull` tree. Returns `null` for invisible
+ * nodes; the caller filters those out of `children`.
  */
 const serialize = (
 	node: SceneNode,
 	root: SceneNode,
-	options: SerializeOptions,
+	ctx: SerializeContext,
 ): NodeFull | null => {
 	if (!node.visible) return null;
-	if (options.excludeText && node.type === "TEXT") return null;
 
 	const out: NodeFull = {
 		id: node.id,
@@ -283,6 +396,20 @@ const serialize = (
 		out.effects = node.effects.map(effectToFull);
 	}
 
+	// Style-name lookups (Figma design tokens).
+	if ("fillStyleId" in node) {
+		const name = lookupStyle(ctx.paintStyles, node.fillStyleId);
+		if (name) out.fillStyle = name;
+	}
+	if ("strokeStyleId" in node) {
+		const name = lookupStyle(ctx.paintStyles, node.strokeStyleId);
+		if (name) out.strokeStyle = name;
+	}
+	if ("effectStyleId" in node) {
+		const name = lookupStyle(ctx.effectStyles, node.effectStyleId);
+		if (name) out.effectStyle = name;
+	}
+
 	const radius = getCornerRadius(node);
 	if (radius !== null) out.cornerRadius = radius;
 
@@ -290,14 +417,55 @@ const serialize = (
 	if (layout) out.layout = layout;
 
 	if (node.type === "TEXT") {
-		out.text = getText(node);
+		out.text = getText(node, ctx);
+		// When redacting, keep the layer name as semantic context, but
+		// cap long auto-named labels (Figma names TEXT layers from
+		// content, which can run to whole paragraphs).
+		if (ctx.options.redactText && out.name.length > 40) {
+			out.name = `${out.name.slice(0, 40)}...`;
+		}
+	}
+
+	// Component instance reference (main component + variant properties).
+	if (node.type === "INSTANCE") {
+		const info = ctx.componentInfo.get(node.id);
+		if (info) {
+			const properties: Record<string, string | boolean> = {};
+			for (const [key, prop] of Object.entries(node.componentProperties)) {
+				if (
+					prop.type === "VARIANT" ||
+					prop.type === "BOOLEAN" ||
+					(prop.type === "TEXT" && typeof prop.value === "string")
+				) {
+					properties[key] = prop.value;
+				}
+			}
+			out.component = {
+				name: info.name,
+				set: info.setName,
+				properties: Object.keys(properties).length ? properties : null,
+			};
+		}
+	}
+
+	// Prototyping reactions → "this node is interactive".
+	if ("reactions" in node && node.reactions.length > 0) {
+		out.interactive = true;
 	}
 
 	if ("children" in node && node.children.length) {
 		const children = node.children
-			.map((c) => serialize(c, root, options))
+			.map((c) => serialize(c, root, ctx))
 			.filter((c): c is NodeFull => c !== null);
 		if (children.length) out.children = children;
+	}
+
+	// Empty frame-like containers are almost certainly slots.
+	const isFrameLike = node.type === "FRAME" || node.type === "GROUP";
+	const hasContent =
+		out.fills || out.strokes || out.effects || out.children || out.text;
+	if (isFrameLike && !hasContent) {
+		out.slot = true;
 	}
 
 	return out;
@@ -310,10 +478,21 @@ const serialize = (
  * solid fills to a hex string. The result is then emitted as TOON.
  */
 const condense = (node: NodeFull): Record<string, unknown> => {
-	const out: Record<string, unknown> = {
-		name: node.name,
-		type: node.type,
-	};
+	// When a TEXT node's name matches its rendered content (Figma's
+	// auto-naming), collapse the duplicate into a single labelled key.
+	// Trim both sides so trailing-whitespace differences still match.
+	const text = node.text;
+	const isAutoNamedText =
+		text !== undefined && node.name.trim() === text.characters.trim();
+	const out: Record<string, unknown> =
+		isAutoNamedText && text
+			? { "name / text": text.characters, type: node.type }
+			: { name: node.name, type: node.type };
+
+	// High-signal semantic flags first.
+	if (node.slot) out.slot = true;
+	if (node.interactive) out.interactive = true;
+	if (node.component) out.component = node.component;
 
 	const { x, y } = node.position;
 	if (x !== 0) out.x = x;
@@ -332,6 +511,7 @@ const condense = (node: NodeFull): Record<string, unknown> => {
 		const fills = node.fills.filter((p) => p.visible).map(condensePaint);
 		if (fills.length === 1) out.fill = fills[0];
 		else if (fills.length > 1) out.fills = fills;
+		if (node.fillStyle) out.fillStyle = node.fillStyle;
 	}
 
 	if (node.strokes?.length) {
@@ -341,6 +521,7 @@ const condense = (node: NodeFull): Record<string, unknown> => {
 			if (node.strokeWeight !== undefined && node.strokeWeight !== 1) {
 				out.strokeWidth = node.strokeWeight;
 			}
+			if (node.strokeStyle) out.strokeStyle = node.strokeStyle;
 		}
 	}
 
@@ -350,6 +531,7 @@ const condense = (node: NodeFull): Record<string, unknown> => {
 			.map(condenseEffect)
 			.filter((e): e is Record<string, unknown> => e !== null);
 		if (eff.length) out.effects = eff;
+		if (node.effectStyle) out.effectStyle = node.effectStyle;
 	}
 
 	if (node.cornerRadius !== undefined && node.cornerRadius !== 0) {
@@ -375,10 +557,9 @@ const condense = (node: NodeFull): Record<string, unknown> => {
 	}
 
 	if (node.text) {
-		// Figma auto-names TEXT layers from their content; if name
-		// already equals the rendered text, the `text` field is just
-		// a duplicate token cost — drop it (name carries the content).
-		if (node.name !== node.text.characters) {
+		// When name is auto-derived from content, the value is already in
+		// the `name / text` combined key — skip emitting `text` here.
+		if (!isAutoNamedText) {
 			out.text = node.text.characters;
 		}
 		if (node.text.fontSize !== null) out.size = node.text.fontSize;
@@ -389,6 +570,7 @@ const condense = (node: NodeFull): Record<string, unknown> => {
 		if (node.text.textAlignHorizontal !== "LEFT") {
 			out.align = node.text.textAlignHorizontal.toLowerCase();
 		}
+		if (node.text.textStyle) out.textStyle = node.text.textStyle;
 	}
 
 	if (node.children?.length) {
@@ -414,6 +596,7 @@ const condensePaint = (p: PaintFull): unknown => {
 	if (p.color) out.color = p.color;
 	if (p.gradientStops) out.stops = p.gradientStops;
 	if (p.scaleMode) out.scaleMode = p.scaleMode;
+	if (p.imageHash) out.imageHash = p.imageHash;
 	return out;
 };
 
