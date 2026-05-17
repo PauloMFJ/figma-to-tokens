@@ -16,6 +16,13 @@
     --pill-fg-active: #ffffff;
     --code-bg: #fafafa;
     --error: #d33;
+    /* JSON viewer palette: darker variants of the brand colors for
+       light-mode contrast on the off-white code background. */
+    --j-key: #3a6acc;
+    --j-string: #cc7a1f;
+    --j-number: #1f8855;
+    --j-keyword: #9a4dcc;
+    --j-bracket: #cc3a3c;
   }
   @media (prefers-color-scheme: dark) {
     :root {
@@ -27,6 +34,12 @@
       --pill-bg-active: #e6e6e6;
       --pill-fg-active: #1e1e1e;
       --code-bg: #1f1f1f;
+      /* Logo colors used as-is in dark mode (high contrast on #1f1f1f). */
+      --j-key: #7da6ff;
+      --j-string: #ffbb80;
+      --j-number: #96eccb;
+      --j-keyword: #eda6ff;
+      --j-bracket: #ff6d6f;
     }
   }
   * { box-sizing: border-box; }
@@ -78,6 +91,18 @@
     color: var(--muted);
     margin-top: 6px;
   }
+  .option {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    margin-top: 8px;
+    font-size: 11px;
+    color: var(--muted);
+    cursor: pointer;
+    user-select: none;
+  }
+  .option input { margin: 0; cursor: pointer; }
+  .option:hover { color: var(--fg); }
   .actions {
     display: flex;
     gap: 8px;
@@ -111,9 +136,9 @@
     background: var(--code-bg);
     font-family: ui-monospace, "SF Mono", Menlo, Consolas, monospace;
     font-size: 11px;
-    line-height: 1.45;
-    white-space: pre;
+    line-height: 1.5;
   }
+  .preview.placeholder { white-space: pre; }
   .footer {
     padding: 8px 16px;
     border-top: 1px solid var(--border);
@@ -131,23 +156,48 @@
   }
   .toast.show { opacity: 1; }
   .toast.error { color: var(--error); }
+
+  /* JSON tree viewer */
+  .j-toggle {
+    display: inline-block;
+    width: 12px;
+    cursor: pointer;
+    user-select: none;
+    color: var(--muted);
+    text-align: center;
+    font-size: 9px;
+  }
+  .j-toggle:hover { color: var(--accent); }
+  .j-bracket { color: var(--j-bracket); }
+  .j-key { color: var(--j-key); }
+  .j-string { color: var(--j-string); }
+  .j-number { color: var(--j-number); }
+  .j-bool, .j-null { color: var(--j-keyword); }
+  .j-comma, .j-colon { color: var(--muted); }
+  .j-children { padding-left: 14px; }
+  .j-summary { color: var(--muted); font-style: italic; }
+  .j-row { white-space: pre; }
 </style>
 </head>
 <body>
   <div class="header">
     <div class="selection" id="selection">No selection</div>
     <div class="mode" role="tablist">
-      <button type="button" id="modeFull" class="active" data-mode="full">Full JSON</button>
-      <button type="button" id="modeCompact" data-mode="compact">Compact</button>
+      <button type="button" id="modeFull" class="active" data-mode="full">Full (JSON)</button>
+      <button type="button" id="modeCompact" data-mode="compact">Compact (TOON)</button>
     </div>
-    <div class="mode-desc" id="modeDesc">All properties, formatted, ~5× more tokens.</div>
+    <div class="mode-desc" id="modeDesc">All properties, formatted JSON. Browse below with collapsible tree.</div>
+    <label class="option">
+      <input type="checkbox" id="excludeText" />
+      <span>Exclude text nodes</span>
+    </label>
   </div>
   <div class="actions">
     <button type="button" id="exportBtn" class="primary">Export</button>
     <button type="button" id="copyBtn" disabled>Copy</button>
     <button type="button" id="downloadBtn" disabled>Download</button>
   </div>
-  <pre class="preview" id="preview">Select a frame and click Export.</pre>
+  <div class="preview placeholder" id="preview">Select a frame and click Export.</div>
   <div class="footer">
     <span id="stats"></span>
     <span class="toast" id="toast"></span>
@@ -155,46 +205,94 @@
 
 <script>
   let currentMode = "full";
-  let currentJson = "";
+  let renders = { full: "", compact: "" };
   let currentSelectionName = "";
 
   const $ = (id) => document.getElementById(id);
 
   const modeDescriptions = {
-    full: "All properties, formatted, ~5× more tokens.",
-    compact: "Short keys, defaults omitted, single-line. Best for LLMs."
+    full: "All properties, formatted JSON.",
+    compact: "Token-Oriented Object Notation: Heavily optimized for LLMs."
   };
 
-  function setMode(mode) {
+  const setMode = (mode) => {
     currentMode = mode;
     $("modeFull").classList.toggle("active", mode === "full");
     $("modeCompact").classList.toggle("active", mode === "compact");
     $("modeDesc").textContent = modeDescriptions[mode];
-  }
+    // Live swap: if we have a render for this mode, show it immediately
+    if (renders[mode]) {
+      showResult(renders[mode], mode);
+    }
+  };
 
   $("modeFull").onclick = () => setMode("full");
   $("modeCompact").onclick = () => setMode("compact");
 
-  $("exportBtn").onclick = () => {
-    showToast("Exporting…");
-    parent.postMessage({ pluginMessage: { type: "export", mode: currentMode } }, "*");
+  const triggerExport = () => {
+    showToast("Exporting...");
+    parent.postMessage({
+      pluginMessage: {
+        type: "export",
+        options: { excludeText: $("excludeText").checked }
+      }
+    }, "*");
+  };
+  $("exportBtn").onclick = triggerExport;
+  $("excludeText").onchange = () => {
+    // Re-export with new option, but only if there's an active export.
+    if (renders.full) triggerExport();
+  };
+
+  // navigator.clipboard is unreliable in the Figma plugin iframe
+  // (especially Figma Web, where the permission is blocked). Try the
+  // modern API first, then fall back to a hidden textarea + execCommand.
+  const copyToClipboard = async (text) => {
+    if (navigator.clipboard?.writeText) {
+      try {
+        await navigator.clipboard.writeText(text);
+        return true;
+      } catch {
+        // fall through to fallback
+      }
+    }
+    const ta = document.createElement("textarea");
+    ta.value = text;
+    ta.setAttribute("readonly", "");
+    ta.style.position = "fixed";
+    ta.style.left = "-9999px";
+    ta.style.top = "0";
+    document.body.appendChild(ta);
+    ta.focus();
+    ta.select();
+    ta.setSelectionRange(0, text.length);
+    let ok = false;
+    try {
+      ok = document.execCommand("copy");
+    } catch {
+      ok = false;
+    }
+    document.body.removeChild(ta);
+    return ok;
   };
 
   $("copyBtn").onclick = async () => {
-    if (!currentJson) return;
-    try {
-      await navigator.clipboard.writeText(currentJson);
+    const json = renders[currentMode];
+    if (!json) return;
+    if (await copyToClipboard(json)) {
       showToast("Copied");
-    } catch {
+    } else {
       showToast("Copy failed", true);
     }
   };
 
   $("downloadBtn").onclick = () => {
-    if (!currentJson) return;
+    const json = renders[currentMode];
+    if (!json) return;
     const safe = (currentSelectionName || "figma-export").replace(/[^a-z0-9_-]+/gi, "_");
-    const suffix = currentMode === "compact" ? ".compact.json" : ".json";
-    const blob = new Blob([currentJson], { type: "application/json" });
+    const suffix = currentMode === "compact" ? ".toon" : ".json";
+    const mime = currentMode === "compact" ? "text/plain" : "application/json";
+    const blob = new Blob([json], { type: mime });
     const url = URL.createObjectURL(blob);
     const a = document.createElement("a");
     a.href = url;
@@ -207,19 +305,19 @@
   };
 
   let toastTimer;
-  function showToast(msg, isError = false) {
+  const showToast = (msg, isError = false) => {
     const t = $("toast");
     t.textContent = msg;
     t.classList.toggle("error", isError);
     t.classList.add("show");
     clearTimeout(toastTimer);
     toastTimer = setTimeout(() => t.classList.remove("show"), 1800);
-  }
+  };
 
-  function renderSelection(info) {
+  const renderSelection = (info) => {
     const sel = $("selection");
     if (!info || info.count === 0) {
-      sel.innerHTML = "No selection — select a frame in Figma";
+      sel.innerHTML = "No selection - select a frame in Figma.";
       currentSelectionName = "";
       return;
     }
@@ -229,36 +327,134 @@
       return;
     }
     currentSelectionName = info.name || "";
-    const size = info.width != null ? ` · ${Math.round(info.width)}×${Math.round(info.height)}` : "";
+    const size = info.width != null ? ` &middot; ${Math.round(info.width)}x${Math.round(info.height)}` : "";
     sel.innerHTML = `<strong>${escapeHtml(info.name)}</strong> <span style="color:var(--muted)">${info.type}${size}</span>`;
-  }
+  };
 
-  function escapeHtml(s) {
-    return String(s).replace(/[&<>"']/g, (c) => ({
+  const escapeHtml = (s) =>
+    String(s).replace(/[&<>"']/g, (c) => ({
       "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;"
     }[c]));
-  }
 
-  function setResult(json, mode) {
-    currentJson = json;
-    const preview = $("preview");
-    if (json.length > 200000) {
-      preview.textContent = json.slice(0, 200000) + "\n\n… (truncated in preview — copy or download for full)";
-    } else {
-      preview.textContent = json;
-    }
+  const formatBytes = (b) => {
+    if (b < 1024) return `${b} B`;
+    if (b < 1024 * 1024) return `${(b / 1024).toFixed(1)} KB`;
+    return `${(b / 1024 / 1024).toFixed(2)} MB`;
+  };
+
+  // Standard "~4 chars per token" rule of thumb. Approximation, not tiktoken.
+  const estimateTokens = (text) => Math.round(text.length / 4);
+
+  const showResult = (text, mode) => {
     $("copyBtn").disabled = false;
     $("downloadBtn").disabled = false;
-    const bytes = new Blob([json]).size;
-    $("stats").textContent = `${mode} · ${formatBytes(bytes)} · ${json.length.toLocaleString()} chars`;
-    showToast("Done");
-  }
+    const preview = $("preview");
+    preview.classList.remove("placeholder");
+    preview.innerHTML = "";
+    // For very large outputs, skip the tree (DOM cost) and show raw text.
+    if (text.length > 500000) {
+      preview.classList.add("placeholder");
+      preview.textContent = `${text.slice(0, 200000)}\n\n... (truncated in preview - copy or download for full)`;
+    } else if (mode === "full") {
+      try {
+        preview.appendChild(renderTree(JSON.parse(text)));
+      } catch {
+        preview.classList.add("placeholder");
+        preview.textContent = text;
+      }
+    } else {
+      // Compact mode is TOON, not JSON — show as plain text.
+      preview.classList.add("placeholder");
+      preview.textContent = text;
+    }
+    const bytes = new Blob([text]).size;
+    const tokens = estimateTokens(text);
+    const label = mode === "compact" ? "TOON" : "JSON";
+    $("stats").textContent =
+      `${label} · ${formatBytes(bytes)} · ${text.length.toLocaleString()} chars · ~${tokens.toLocaleString()} tokens`;
+  };
 
-  function formatBytes(b) {
-    if (b < 1024) return b + " B";
-    if (b < 1024 * 1024) return (b / 1024).toFixed(1) + " KB";
-    return (b / 1024 / 1024).toFixed(2) + " MB";
-  }
+  const el = (tag, className, text) => {
+    const e = document.createElement(tag);
+    if (className) e.className = className;
+    if (text != null) e.textContent = text;
+    return e;
+  };
+
+  const renderTree = (value) => {
+    const root = el("div");
+    root.appendChild(renderValue(value, 0));
+    return root;
+  };
+
+  const renderValue = (value, depth) => {
+    if (value === null) return el("span", "j-null", "null");
+    if (typeof value === "boolean") return el("span", "j-bool", String(value));
+    if (typeof value === "number") return el("span", "j-number", String(value));
+    if (typeof value === "string") return el("span", "j-string", JSON.stringify(value));
+    if (Array.isArray(value)) return renderArray(value, depth);
+    if (typeof value === "object") return renderObject(value, depth);
+    return el("span", "", String(value));
+  };
+
+  const renderObject = (obj, depth) => {
+    const keys = Object.keys(obj);
+    if (keys.length === 0) return el("span", "j-bracket", "{}");
+    return renderGroup({
+      open: "{",
+      close: "}",
+      count: keys.length,
+      label: keys.length === 1 ? "prop" : "props",
+      depth,
+      items: keys.map((k, i) => (parent) => {
+        const row = el("div", "j-row");
+        row.appendChild(el("span", "j-key", JSON.stringify(k)));
+        row.appendChild(el("span", "j-colon", ": "));
+        row.appendChild(renderValue(obj[k], depth + 1));
+        if (i < keys.length - 1) row.appendChild(el("span", "j-comma", ","));
+        parent.appendChild(row);
+      }),
+    });
+  };
+
+  const renderArray = (arr, depth) => {
+    if (arr.length === 0) return el("span", "j-bracket", "[]");
+    return renderGroup({
+      open: "[",
+      close: "]",
+      count: arr.length,
+      label: arr.length === 1 ? "item" : "items",
+      depth,
+      items: arr.map((v, i) => (parent) => {
+        const row = el("div", "j-row");
+        row.appendChild(renderValue(v, depth + 1));
+        if (i < arr.length - 1) row.appendChild(el("span", "j-comma", ","));
+        parent.appendChild(row);
+      }),
+    });
+  };
+
+  const renderGroup = ({ open, close, count, label, depth, items }) => {
+    const wrap = el("span");
+    const toggle = el("span", "j-toggle");
+    const openBr = el("span", "j-bracket", open);
+    const summary = el("span", "j-summary", ` ${count} ${label} `);
+    const closeBr = el("span", "j-bracket", close);
+    const children = el("div", "j-children");
+    items.forEach((build) => { build(children); });
+
+    let isOpen = depth < 2;
+    const update = () => {
+      toggle.textContent = isOpen ? "▾" : "▸";
+      children.style.display = isOpen ? "block" : "none";
+      summary.style.display = isOpen ? "none" : "inline";
+    };
+    update();
+    toggle.onclick = () => { isOpen = !isOpen; update(); };
+
+    wrap.append(toggle, openBr, summary, children, closeBr);
+    return wrap;
+  };
 
   window.onmessage = (event) => {
     const msg = event.data.pluginMessage;
@@ -266,9 +462,17 @@
     if (msg.type === "selection") {
       renderSelection(msg.info);
     } else if (msg.type === "result") {
-      setResult(msg.json, msg.mode);
+      renders.full = msg.full;
+      renders.compact = msg.compact;
+      showResult(renders[currentMode], currentMode);
     } else if (msg.type === "error") {
-      $("preview").textContent = "";
+      renders = { full: "", compact: "" };
+      $("copyBtn").disabled = true;
+      $("downloadBtn").disabled = true;
+      const preview = $("preview");
+      preview.classList.add("placeholder");
+      preview.textContent = "";
+      $("stats").textContent = "";
       showToast(msg.message, true);
     }
   };
