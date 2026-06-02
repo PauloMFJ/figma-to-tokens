@@ -431,13 +431,24 @@ const serialize = (
 		const info = ctx.componentInfo.get(node.id);
 		if (info) {
 			const properties: Record<string, string | boolean> = {};
-			for (const [key, prop] of Object.entries(node.componentProperties)) {
-				if (
-					prop.type === "VARIANT" ||
-					prop.type === "BOOLEAN" ||
-					(prop.type === "TEXT" && typeof prop.value === "string")
-				) {
-					properties[key] = prop.value;
+			// Reading `componentProperties` throws when the instance's
+			// component set has existing errors ("Component set for node
+			// has existing errors"). Treat that as "no properties".
+			let props: InstanceNode["componentProperties"] | null = null;
+			try {
+				props = node.componentProperties;
+			} catch {
+				props = null;
+			}
+			if (props) {
+				for (const [key, prop] of Object.entries(props)) {
+					if (
+						prop.type === "VARIANT" ||
+						prop.type === "BOOLEAN" ||
+						(prop.type === "TEXT" && typeof prop.value === "string")
+					) {
+						properties[key] = prop.value;
+					}
 				}
 			}
 			out.component = {
