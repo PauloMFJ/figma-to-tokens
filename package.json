@@ -1,6 +1,6 @@
 {
 	"name": "figma-to-tokens",
-	"version": "1.0.1",
+	"version": "1.0.2",
 	"description": "Export Figma designs to clean JSON tokens for AI, LLMs and agents. Works in free Figma.",
 	"main": ".output/build.js",
 	"scripts": {

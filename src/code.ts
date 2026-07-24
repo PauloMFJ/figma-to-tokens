@@ -578,6 +578,21 @@ const condense = (node: NodeFull): Record<string, unknown> => {
 			out.font = `${node.text.fontName.family} ${node.text.fontName.style}`;
 		}
 		if (node.text.color) out.color = node.text.color;
+		if (node.text.lineHeight && node.text.lineHeight !== "auto") {
+			out.lineHeight = node.text.lineHeight;
+		}
+		if (node.text.letterSpacing && node.text.letterSpacing !== "0px") {
+			out.letterSpacing = node.text.letterSpacing;
+		}
+		if (node.text.textCase && node.text.textCase !== "ORIGINAL") {
+			out.textCase = node.text.textCase.toLowerCase();
+		}
+		if (
+			typeof node.text.textDecoration === "string" &&
+			node.text.textDecoration !== "NONE"
+		) {
+			out.textDecoration = node.text.textDecoration.toLowerCase();
+		}
 		if (node.text.textAlignHorizontal !== "LEFT") {
 			out.align = node.text.textAlignHorizontal.toLowerCase();
 		}
